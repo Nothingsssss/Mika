@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -44,6 +45,7 @@ import com.wangzan101.mika.ui.theme.MikaTheme
 import com.wangzan101.mika.ui.theme.MikaType
 import com.wangzan101.mika.wechat.WechatConnectionState
 import com.wangzan101.mika.wechat.WechatRuntime
+import com.wangzan101.mika.wechat.WechatLoginPhase
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -69,6 +71,8 @@ internal fun WechatEntryStatus(state: WechatConnectionState, bound: Boolean) {
 @Composable
 fun WechatSettingsScreen(runtime: WechatRuntime, onBack: () -> Unit) {
     val state by runtime.state.collectAsState()
+    val loginPhase by runtime.loginPhase.collectAsState()
+    var verification by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
     var bound by remember { mutableStateOf(runtime.store.account() != null) }
     var loginContent by remember { mutableStateOf<String?>(null) }
@@ -120,10 +124,11 @@ fun WechatSettingsScreen(runtime: WechatRuntime, onBack: () -> Unit) {
                 }
             } catch (e: CancellationException) {
                 throw e
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 if (loginGeneration == generation) {
                     loginContent = null
-                    loginError = loginFailedText
+                    loginError = if (e is IllegalArgumentException || e is IllegalStateException)
+                        e.message ?: loginFailedText else loginFailedText
                 }
             } finally {
                 if (loginGeneration == generation) {
@@ -177,6 +182,24 @@ fun WechatSettingsScreen(runtime: WechatRuntime, onBack: () -> Unit) {
                     Text(
                         stringResource(R.string.wechat_qr_help), style = MikaType.Caption,
                         color = MikaTheme.colors.ink2, textAlign = TextAlign.Center,
+                    )
+                    Text(stringResource(when (loginPhase) {
+                        WechatLoginPhase.Waiting -> R.string.wechat_status_waiting
+                        WechatLoginPhase.Scanned -> R.string.wechat_scan_confirm
+                        WechatLoginPhase.VerifyCode -> R.string.wechat_verify_prompt
+                    }), style = MikaType.Caption, color = MikaTheme.colors.ink2)
+                    if (loginPhase == WechatLoginPhase.VerifyCode) {
+                        OutlinedTextField(verification, { verification = it.filter(Char::isDigit).take(12) },
+                            label = { Text(stringResource(R.string.wechat_verify_code)) }, singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("wechat-verify-code"))
+                        MikaButton(stringResource(R.string.wechat_verify_submit), {
+                            runtime.submitVerifyCode(verification)
+                            verification = ""
+                        }, Modifier.fillMaxWidth(), enabled = verification.length in 4..12)
+                    }
+                    MikaButton(
+                        stringResource(R.string.wechat_refresh_qr), { cancelLogin(); startLogin() },
+                        Modifier.fillMaxWidth(), kind = ButtonKind.Text,
                     )
                     MikaButton(
                         stringResource(R.string.cancel), ::cancelLogin, Modifier.fillMaxWidth().padding(top = 8.dp),

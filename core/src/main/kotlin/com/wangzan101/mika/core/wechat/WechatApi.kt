@@ -37,7 +37,10 @@ private object FlexibleStringSerializer : KSerializer<String> {
 }
 
 @Serializable
-data class WechatBaseInfo(@SerialName("channel_version") val channelVersion: String)
+data class WechatBaseInfo(
+    @SerialName("channel_version") val channelVersion: String,
+    @SerialName("bot_agent") val botAgent: String,
+)
 
 @Serializable
 data class WechatAccount(
@@ -51,6 +54,7 @@ data class WechatAccount(
 data class WechatQrStart(
     val ret: Int = 0,
     val errmsg: String? = null,
+    val errcode: Int = 0,
     val qrcode: String? = null,
     @SerialName("qrcode_img_content") val qrContent: String? = null,
 )
@@ -59,11 +63,13 @@ data class WechatQrStart(
 data class WechatQrStatus(
     val ret: Int = 0,
     val errmsg: String? = null,
+    val errcode: Int = 0,
     val status: String = "wait",
     @SerialName("bot_token") val token: String? = null,
     @SerialName("ilink_bot_id") val botId: String? = null,
     @SerialName("baseurl") val baseUrl: String? = null,
     @SerialName("ilink_user_id") val ownerId: String? = null,
+    @SerialName("redirect_host") val redirectHost: String? = null,
 ) {
     fun account(): WechatAccount? {
         if (status != "confirmed" || token.isNullOrBlank() || ownerId.isNullOrBlank()) return null
@@ -111,8 +117,10 @@ private data class UpdatesRequest(
 data class WechatUpdates(
     val ret: Int = 0,
     val errmsg: String? = null,
+    val errcode: Int = 0,
     val msgs: List<WechatMessage> = emptyList(),
     @SerialName("get_updates_buf") val cursor: String = "",
+    @SerialName("longpolling_timeout_ms") val longPollingTimeoutMs: Long = 35_000,
 )
 
 @Serializable
@@ -130,17 +138,23 @@ class WechatApi(
     private val channelVersion: String,
     private val defaultBaseUrl: String = DEFAULT_BASE_URL,
 ) {
+    // Protocol revision used by this native implementation, not an OpenClaw identity.
+    private val protocolVersion = "2.4.10"
+    private fun baseInfo() = WechatBaseInfo(protocolVersion, "Mika/$channelVersion")
+
     fun startLogin(): WechatQrStart {
         val url = endpoint(defaultBaseUrl, "get_bot_qrcode").newBuilder()
             .addQueryParameter("bot_type", "3").build()
-        val request = Request.Builder().url(url).headers(headers()).post(ByteArray(0).toRequestBody(null)).build()
+        val request = Request.Builder().url(url).headers(postHeaders()).post("""{"local_token_list":[]}""".toRequestBody(jsonBody)).build()
         return execute(request, WechatQrStart.serializer())
     }
 
-    fun pollLogin(qrcode: String): WechatQrStatus {
-        val url = endpoint(defaultBaseUrl, "get_qrcode_status").newBuilder()
-            .addQueryParameter("qrcode", qrcode).build()
-        return execute(Request.Builder().url(url).headers(headers()).get().build(), WechatQrStatus.serializer())
+    suspend fun pollLogin(qrcode: String, baseUrl: String = defaultBaseUrl, verifyCode: String? = null): WechatQrStatus {
+        val url = endpoint(baseUrl, "get_qrcode_status").newBuilder()
+            .addQueryParameter("qrcode", qrcode).apply {
+                verifyCode?.let { addQueryParameter("verify_code", it) }
+            }.build()
+        return executeCancellable(Request.Builder().url(url).headers(headers()).get().build(), WechatQrStatus.serializer())
     }
 
     fun updates(account: WechatAccount, cursor: String): WechatUpdates =
@@ -151,23 +165,23 @@ class WechatApi(
         executeCancellable(updatesRequest(account, cursor), WechatUpdates.serializer())
 
     private fun updatesRequest(account: WechatAccount, cursor: String): Request {
-        val body = UpdatesRequest(cursor, WechatBaseInfo(channelVersion))
+        val body = UpdatesRequest(cursor, baseInfo())
         val payload = json.encodeToString(UpdatesRequest.serializer(), body).toRequestBody(jsonBody)
-        return Request.Builder().url(endpoint(account.baseUrl, "getupdates")).headers(headers(account.token)).post(payload).build()
+        return Request.Builder().url(endpoint(account.baseUrl, "getupdates")).headers(postHeaders(account.token)).post(payload).build()
     }
 
     fun sendText(account: WechatAccount, peerId: String, clientId: String, text: String, contextToken: String?) {
         val message = WechatMessage(fromUserId = "", toUserId = peerId, clientId = clientId,
             messageType = 2, messageState = 2, items = listOf(WechatItem(type = 1, textItem = WechatText(text))),
             contextToken = contextToken)
-        val body = SendRequest(message, WechatBaseInfo(channelVersion))
+        val body = SendRequest(message, baseInfo())
         post(account, "sendmessage", body, SendRequest.serializer(), WechatQrStart.serializer())
     }
 
     private inline fun <reified T, reified R> post(account: WechatAccount, path: String, body: T,
         bodySerializer: kotlinx.serialization.SerializationStrategy<T>, responseSerializer: kotlinx.serialization.DeserializationStrategy<R>): R {
         val payload = json.encodeToString(bodySerializer, body).toRequestBody(jsonBody)
-        val request = Request.Builder().url(endpoint(account.baseUrl, path)).headers(headers(account.token)).post(payload).build()
+        val request = Request.Builder().url(endpoint(account.baseUrl, path)).headers(postHeaders(account.token)).post(payload).build()
         return execute(request, responseSerializer)
     }
 
@@ -202,9 +216,9 @@ class WechatApi(
         if (text.isBlank()) throw IOException("WeChat returned an empty response")
         val result = json.decodeFromString(serializer, text)
         val (code, message) = when (result) {
-            is WechatQrStart -> result.ret to result.errmsg
-            is WechatQrStatus -> result.ret to result.errmsg
-            is WechatUpdates -> result.ret to result.errmsg
+            is WechatQrStart -> (result.ret.takeIf { it != 0 } ?: result.errcode) to result.errmsg
+            is WechatQrStatus -> (result.ret.takeIf { it != 0 } ?: result.errcode) to result.errmsg
+            is WechatUpdates -> (result.ret.takeIf { it != 0 } ?: result.errcode) to result.errmsg
             else -> 0 to null
         }
         if (code != 0) throw WechatApiException(code, message ?: "WeChat API error $code")
@@ -214,20 +228,34 @@ class WechatApi(
     private fun endpoint(base: String, path: String) =
         base.trimEnd('/').toHttpUrl().newBuilder().addPathSegments("ilink/bot/$path").build()
 
-    private fun headers(token: String? = null) = okhttp3.Headers.Builder().apply {
+    private fun headers() = okhttp3.Headers.Builder().apply {
         add("iLink-App-Id", "bot")
-        add("iLink-App-ClientVersion", encodeVersion(channelVersion))
-        if (token != null) {
-            add("AuthorizationType", "ilink_bot_token")
-            add("Authorization", "Bearer $token")
-            add("X-WECHAT-UIN", randomUin())
-        }
+        add("iLink-App-ClientVersion", encodeVersion(protocolVersion))
     }.build()
 
-    private fun encodeVersion(version: String) =
-        String.format("%08x", version.filter { it.isDigit() }.take(8).ifEmpty { "1" }.toLong().toInt())
+    private fun postHeaders(token: String? = null) = headers().newBuilder().apply {
+        add("AuthorizationType", "ilink_bot_token")
+        add("X-WECHAT-UIN", randomUin())
+        token?.let { add("Authorization", "Bearer $it") }
+    }.build()
 
-    private fun randomUin(): String = Base64.getEncoder()
-        .encodeToString(ByteArray(4).also { Random.nextBytes(it) })
+    private fun encodeVersion(version: String): String {
+        val parts = version.split('.').map { it.toIntOrNull() ?: 0 }
+        return ((parts.getOrElse(0) { 0 } shl 16) or
+            (parts.getOrElse(1) { 0 } shl 8) or parts.getOrElse(2) { 0 }).toString()
+    }
+
+    private fun randomUin(): String = Base64.getEncoder().encodeToString(
+        Random.nextInt().toUInt().toString().toByteArray(Charsets.US_ASCII))
 }
 
+/** Validate before any credential is sent; never follow a QR redirect to an arbitrary host. */
+fun wechatServerUrl(value: String): String {
+    val url = (if ("://" in value) value else "https://$value").toHttpUrl()
+    require(url.isHttps && url.port == 443 && url.username.isEmpty() && url.password.isEmpty() &&
+        (url.host == "weixin.qq.com" || url.host.endsWith(".weixin.qq.com")) &&
+        url.encodedPath == "/" && url.query == null && url.fragment == null) {
+        "WeChat returned an unsupported server address"
+    }
+    return url.toString().trimEnd('/')
+}

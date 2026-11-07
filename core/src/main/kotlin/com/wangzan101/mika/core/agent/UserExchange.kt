@@ -107,7 +107,12 @@ internal class UserExchange(
     suspend fun awaitAnswer(prompt: String, options: List<String>?): String? {
         if (provenance.attendance == Attendance.Unattended) return null
         val pending = CompletableDeferred<String>().also { inputReply = it }
-        val ask = ask(Delivery.Ask.Kind.Input, prompt)
+        val channelPrompt = if (options.isNullOrEmpty()) prompt else buildString {
+            append(prompt)
+            options.forEachIndexed { index, option -> append("\n${index + 1}. $option") }
+            append("\n请直接回复选项文字，也可以输入其他回答。")
+        }
+        val ask = ask(Delivery.Ask.Kind.Input, channelPrompt)
         activeAsk = ask
         setState(TaskState.WaitingInput(prompt, options))
         emit(RunEvent.State(now(), "waiting_input", detail(prompt)))

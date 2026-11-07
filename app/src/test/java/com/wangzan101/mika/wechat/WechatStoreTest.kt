@@ -97,4 +97,38 @@ class WechatStoreTest {
         assertFalse(store.enabled())
         assertEquals("", store.cursor())
     }
+
+    @Test fun encryptedStateAndSessionCooldownSurviveRestartAndUnbindClearsThem() {
+        val key = javax.crypto.KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
+        val secure = com.wangzan101.mika.settings.AesGcmKeyCipher { key }
+        val dir = tmp.newFolder()
+        val first = WechatStore(dir, secure)
+        first.saveAccount(WechatAccount("secret-token", "https://ilinkai.weixin.qq.com", "bot", "owner"))
+        first.setEnabled(true)
+        first.rememberContext("owner", "secret-context")
+        first.suspendUntil(123456789)
+        first.journal("stop", first.peer("owner"), "停止", stopRequested = true, stopRunId = "run-1")
+        assertFalse(java.io.File(dir, "state.enc").readBytes().decodeToString().contains("secret-context"))
+        assertFalse(java.io.File(dir, "account.enc").readBytes().decodeToString().contains("secret-token"))
+        val restored = WechatStore(dir, secure)
+        assertEquals(123456789L, restored.suspendedUntilMs())
+        assertEquals("run-1", restored.pending().single().stopRunId)
+        restored.clear()
+        val cleared = WechatStore(dir, secure)
+        assertEquals(null, cleared.account())
+        assertEquals(null, cleared.contextToken("owner"))
+        assertEquals(0L, cleared.suspendedUntilMs())
+        assertTrue(cleared.pending().isEmpty())
+    }
+
+    @Test fun corruptStateFailsClosedRatherThanReexecutingMessages() {
+        val dir = tmp.newFolder()
+        java.io.File(dir, "state.enc").writeText("corrupt")
+        val store = WechatStore(dir, cipher)
+        assertFalse(store.enabled())
+        try { store.setEnabled(true); org.junit.Assert.fail("must not discard dedup ledger") }
+        catch (_: IllegalStateException) { }
+        store.clear()
+        assertFalse(WechatStore(dir, cipher).enabled())
+    }
 }

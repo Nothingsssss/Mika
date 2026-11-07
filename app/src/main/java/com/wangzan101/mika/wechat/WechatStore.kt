@@ -15,12 +15,15 @@ data class PendingWechatMessage(
     val peer: ChannelPeer,
     val text: String,
     val replyToAskId: String? = null,
+    val stopRequested: Boolean = false,
+    val stopRunId: String? = null,
 )
 
 @Serializable
 private data class WechatState(
     val enabled: Boolean = false,
     val cursor: String = "",
+    val suspendedUntilMs: Long = 0,
     val threads: Map<String, String> = emptyMap(),
     val contextTokens: Map<String, String> = emptyMap(),
     val pending: List<PendingWechatMessage> = emptyList(),
@@ -32,7 +35,9 @@ private data class WechatState(
 class WechatStore(private val dir: File, private val cipher: KeyCipher) {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
     private val credentials = File(dir, "account.enc")
-    private val stateFile = File(dir, "state.json")
+    private val stateFile = File(dir, "state.enc")
+    private val legacyStateFile = File(dir, "state.json")
+    private var stateUnreadable = false
     private var state = readState()
     @Volatile private var account: WechatAccount? = readAccount()
 
@@ -40,7 +45,8 @@ class WechatStore(private val dir: File, private val cipher: KeyCipher) {
 
     @Synchronized fun saveAccount(value: WechatAccount) {
         val sameAccount = account?.let { it.ownerId == value.ownerId && it.botId == value.botId } == true
-        if (!sameAccount) {
+        if (!sameAccount || stateUnreadable) {
+            stateUnreadable = false
             // 先清旧账号的游标与账本；即使进程在换绑中途退出，也不会把旧消息交给新账号。
             state = WechatState()
             saveState()
@@ -51,13 +57,17 @@ class WechatStore(private val dir: File, private val cipher: KeyCipher) {
 
     @Synchronized fun clear() {
         account = null
-        credentials.delete()
+        check(!credentials.exists() || credentials.delete()) { "Could not remove WeChat credentials" }
+        legacyStateFile.delete()
+        stateUnreadable = false
         state = WechatState()
         saveState()
     }
 
     @Synchronized fun enabled() = state.enabled
-    @Synchronized fun setEnabled(value: Boolean) { state = state.copy(enabled = value); saveState() }
+    @Synchronized fun setEnabled(value: Boolean) { check(!stateUnreadable) { "WeChat state is unreadable; bind again before receiving tasks" }; state = state.copy(enabled = value); saveState() }
+    @Synchronized fun suspendedUntilMs() = state.suspendedUntilMs
+    @Synchronized fun suspendUntil(value: Long) { state = state.copy(suspendedUntilMs = value); saveState() }
     @Synchronized fun cursor() = state.cursor
     @Synchronized fun saveCursor(value: String) { state = state.copy(cursor = value); saveState() }
     @Synchronized fun contextToken(peerId: String) = state.contextTokens[peerId]
@@ -77,9 +87,9 @@ class WechatStore(private val dir: File, private val cipher: KeyCipher) {
     }
 
     /** 同一消息只入站一次；未确认的会在下次启动由 [pending] 补交。 */
-    @Synchronized fun journal(messageId: String, peer: ChannelPeer, text: String, replyToAskId: String? = null): Boolean {
+    @Synchronized fun journal(messageId: String, peer: ChannelPeer, text: String, replyToAskId: String? = null, stopRequested: Boolean = false, stopRunId: String? = null): Boolean {
         if (messageId in state.acknowledgedMessages || state.pending.any { it.messageId == messageId }) return false
-        state = state.copy(pending = state.pending + PendingWechatMessage(messageId, peer, text, replyToAskId))
+        state = state.copy(pending = state.pending + PendingWechatMessage(messageId, peer, text, replyToAskId, stopRequested, stopRunId))
         saveState()
         return true
     }
@@ -96,15 +106,26 @@ class WechatStore(private val dir: File, private val cipher: KeyCipher) {
         saveState()
     }
 
-    private fun readState(): WechatState = if (stateFile.isFile) runCatching {
-        json.decodeFromString(WechatState.serializer(), stateFile.readText())
-    }.getOrElse { WechatState() } else WechatState()
+    private fun readState(): WechatState = try { readStoredState() } catch (_: Exception) {
+        stateUnreadable = true
+        WechatState() // Keep other Mika features available, but never resume with a lost dedup ledger.
+    }
+
+    private fun readStoredState(): WechatState {
+        if (stateFile.isFile) return json.decodeFromString(WechatState.serializer(),
+            cipher.decrypt(stateFile.readBytes()).decodeToString())
+        if (!legacyStateFile.isFile) return WechatState()
+        val restored = json.decodeFromString(WechatState.serializer(), legacyStateFile.readText())
+        writeAtomic(stateFile, cipher.encrypt(json.encodeToString(WechatState.serializer(), restored).toByteArray()))
+        check(legacyStateFile.delete()) { "Could not remove legacy WeChat state" }
+        return restored
+    }
 
     private fun readAccount(): WechatAccount? = if (credentials.isFile) runCatching {
         json.decodeFromString(WechatAccount.serializer(), cipher.decrypt(credentials.readBytes()).decodeToString())
     }.getOrNull() else null
 
-    private fun saveState() = writeAtomic(stateFile, json.encodeToString(WechatState.serializer(), state).toByteArray())
+    private fun saveState() = writeAtomic(stateFile, cipher.encrypt(json.encodeToString(WechatState.serializer(), state).toByteArray()))
 
     private fun writeAtomic(file: File, bytes: ByteArray) {
         file.parentFile?.mkdirs()

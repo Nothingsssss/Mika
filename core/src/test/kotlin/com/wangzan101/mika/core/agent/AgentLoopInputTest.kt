@@ -60,6 +60,8 @@ class AgentLoopInputTest {
         val run = async { l.run("t") }
         runCurrent() // advanceUntilIdle 会把虚拟时间推过追问时限
         assertEquals(TaskState.WaitingInput("发给哪个张伟?", listOf("同事张伟", "同学张伟")), l.state.value)
+        assertTrue(l.activeAsk!!.text.contains("1. 同事张伟"))
+        assertTrue(l.activeAsk!!.text.contains("2. 同学张伟"))
         assertTrue(l.answerInput("就第一个吧"))
         com.wangzan101.mika.core.testing.assertAnswered(DONE, run.await())
         // 用户答了、模型什么也没做就要交回答:提醒一次照做(或说明为什么不做),第二次照常收下

@@ -277,4 +277,46 @@ class WechatChannelTest {
             assertEquals(SendOutcome.Uncertain, channel.send(peer, delivery))
         }
     }
+
+    @Test fun stopUsesExistingRunAndDuplicateDoesNotStopAnotherRun() = runTest {
+        MockWebServer().use { server ->
+            server.start(InetAddress.getByName("127.0.0.1"), 0)
+            val store = WechatStore(tmp.newFolder(), cipher)
+            store.saveAccount(WechatAccount("token", server.url("/").toString(), "bot", "owner"))
+            store.setEnabled(true)
+            var active = RunId("first-run")
+            val channel = WechatChannel(store, WechatApi(OkHttpClient(), "0.1.38"),
+                activeRun = { active }, log = {})
+            val received = mutableListOf<ChannelInput>()
+            channel.start(ChannelInputSink { received += it })
+            val update = """{"get_updates_buf":"next","msgs":[{"message_id":"stop-1","from_user_id":"owner","message_type":1,"context_token":"ctx","item_list":[{"type":1,"text_item":{"text":"停止"}}]}]}"""
+            server.enqueue(response(update))
+            server.enqueue(response("""{"ret":0}"""))
+            channel.pollOnce()
+            active = RunId("second-run")
+            server.enqueue(response(update))
+            channel.pollOnce()
+            assertEquals(listOf(ChannelInput.Stop(store.peer("owner"), RunId("first-run"))), received)
+            assertTrue(store.pending().isEmpty())
+            assertEquals(3, server.requestCount)
+        }
+    }
+
+    @Test fun unauthorizedStopCannotChangeContextOrCancelTask() = runTest {
+        MockWebServer().use { server ->
+            server.start(InetAddress.getByName("127.0.0.1"), 0)
+            val store = WechatStore(tmp.newFolder(), cipher)
+            store.saveAccount(WechatAccount("token", server.url("/").toString(), "bot", "owner"))
+            store.setEnabled(true)
+            val channel = WechatChannel(store, WechatApi(OkHttpClient(), "0.1.38"),
+                activeRun = { RunId("run") }, log = {})
+            val received = mutableListOf<ChannelInput>()
+            channel.start(ChannelInputSink { received += it })
+            server.enqueue(response("""{"get_updates_buf":"next","msgs":[{"message_id":"attack","from_user_id":"stranger","message_type":1,"context_token":"bad","item_list":[{"type":1,"text_item":{"text":"停止"}}]}]}"""))
+            channel.pollOnce()
+            assertTrue(received.isEmpty())
+            assertEquals(null, store.contextToken("stranger"))
+            assertEquals(null, store.contextToken("owner"))
+        }
+    }
 }

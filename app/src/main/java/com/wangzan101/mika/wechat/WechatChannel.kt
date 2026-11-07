@@ -7,6 +7,7 @@ import com.wangzan101.mika.core.run.ChannelInputSink
 import com.wangzan101.mika.core.run.ChannelPeer
 import com.wangzan101.mika.core.run.Delivery
 import com.wangzan101.mika.core.run.SendOutcome
+import com.wangzan101.mika.core.run.RunId
 import com.wangzan101.mika.core.wechat.WechatApi
 import com.wangzan101.mika.core.wechat.WechatApiException
 import com.wangzan101.mika.core.wechat.WechatUpdates
@@ -22,6 +23,7 @@ class WechatChannel(
     private val store: WechatStore,
     private val api: WechatApi,
     private val activeAsk: (String) -> Delivery.Ask? = { null },
+    private val activeRun: (String) -> RunId? = { null },
     private val log: (String) -> Unit = { Log.i(TAG, it) },
 ) : Channel {
     override val id = ID
@@ -73,7 +75,7 @@ class WechatChannel(
         val account = store.account()?.takeIf { store.enabled() } ?: return@withLock null
         store.pending().forEach { pending ->
             if (store.account() != account || pending.peer.peerId != account.ownerId || sink !== input) return@withLock null
-            input.receive(ChannelInput.Text(pending.peer, pending.messageId, pending.text, pending.replyToAskId))
+            dispatch(input, pending)
         }
         val updates = api.updatesCancellable(account, store.cursor())
         // 换绑或停止后，旧请求的结果不能再写入新会话，也不能推进新账号的游标。
@@ -89,12 +91,25 @@ class WechatChannel(
             val askId = activeAsk(peer.threadId)
                 ?.takeIf { it.kind == Delivery.Ask.Kind.Input }
                 ?.askId
-            if (store.journal(messageId, peer, text, askId)) {
-                input.receive(ChannelInput.Text(peer, messageId, text, askId))
+            val stop = text.trim().lowercase() in setOf("停止", "停止任务", "/stop")
+            val target = if (stop) activeRun(peer.threadId)?.value else null
+            if (store.journal(messageId, peer, text, askId, stop, target)) {
+                dispatch(input, PendingWechatMessage(messageId, peer, text, askId, stop, target))
             }
         }
         if (updates.cursor.isNotEmpty() && store.account() == account && store.enabled()) store.saveCursor(updates.cursor)
         updates
+    }
+
+    private suspend fun dispatch(input: ChannelInputSink, pending: PendingWechatMessage) {
+        if (!pending.stopRequested) {
+            input.receive(ChannelInput.Text(pending.peer, pending.messageId, pending.text, pending.replyToAskId))
+            return
+        }
+        pending.stopRunId?.let { input.receive(ChannelInput.Stop(pending.peer, RunId(it))) }
+        send(pending.peer, Delivery.Notice("stopped:${pending.messageId}", pending.peer.threadId,
+            if (pending.stopRunId == null) "当前没有正在运行的任务。" else "已请求停止当前任务。"))
+        acknowledge(pending.messageId)
     }
 
     companion object {

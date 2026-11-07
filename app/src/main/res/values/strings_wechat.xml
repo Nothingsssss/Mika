@@ -51,4 +51,9 @@
     <string name="wechat_phone_only">Phone</string>
     <string name="wechat_later">Later</string>
     <string name="wechat_footer">Mika has no relay server, but an internet connection is required. Messages still pass through WeChat; cloud models use the existing network settings. Bot credentials are encrypted with Android Keystore and stored only on this phone.</string>
+    <string name="wechat_scan_confirm">Scanned · Confirm in WeChat</string>
+    <string name="wechat_verify_prompt">Enter the verification code shown in WeChat</string>
+    <string name="wechat_verify_code">Verification code</string>
+    <string name="wechat_verify_submit">Verify</string>
+    <string name="wechat_refresh_qr">Refresh QR code</string>
 </resources>

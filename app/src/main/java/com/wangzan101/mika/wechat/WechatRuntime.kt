@@ -16,6 +16,10 @@ import com.wangzan101.mika.core.run.RunId
 import com.wangzan101.mika.core.wechat.WechatAccount
 import com.wangzan101.mika.core.wechat.WechatApi
 import com.wangzan101.mika.core.wechat.WechatHttpException
+import com.wangzan101.mika.core.wechat.WechatApiException
+import com.wangzan101.mika.core.wechat.wechatServerUrl
+import java.util.concurrent.atomic.AtomicReference
+import java.net.SocketTimeoutException
 import com.wangzan101.mika.core.wechat.WechatQrStart
 import com.wangzan101.mika.settings.FeatureFlags
 import com.wangzan101.mika.task.TaskService
@@ -35,6 +39,8 @@ import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 import kotlin.math.min
+
+enum class WechatLoginPhase { Waiting, Scanned, VerifyCode }
 
 sealed interface WechatConnectionState {
     data object Off : WechatConnectionState
@@ -75,13 +81,22 @@ class WechatRuntime(
         })
 
     val channel = WechatChannel(store, api,
-        activeAsk = { threadId -> app.taskState.run(threadId)?.activeAsk })
+        activeAsk = { threadId -> app.taskState.run(threadId)?.activeAsk },
+        activeRun = { threadId -> app.taskState.run(threadId)?.let { RunId(it.key) } })
     private var registration: AutoCloseable? = null
     private var monitor: Job? = null
     private val network = WechatNetwork(context) { restartMonitor() }
     private val _state = MutableStateFlow<WechatConnectionState>(
         if (store.account() == null) WechatConnectionState.NeedsBinding else WechatConnectionState.Off)
     val state: StateFlow<WechatConnectionState> = _state.asStateFlow()
+    private val _loginPhase = MutableStateFlow(WechatLoginPhase.Waiting)
+    val loginPhase = _loginPhase.asStateFlow()
+    private val verifyCode = AtomicReference<String?>(null)
+    fun submitVerifyCode(value: String) {
+        require(value.matches(Regex("[0-9]{4,12}"))) { "Enter the verification code shown in WeChat" }
+        verifyCode.set(value)
+        _loginPhase.value = WechatLoginPhase.Scanned
+    }
 
     fun channelFor(id: String) = channel.takeIf { id == WechatChannel.ID }
     fun acknowledge(messageId: String) = store.acknowledge(messageId)
@@ -130,14 +145,42 @@ class WechatRuntime(
         }
     }
 
-    suspend fun startLogin(): WechatQrStart = withContext(Dispatchers.IO) { api.startLogin() }
+    suspend fun startLogin(): WechatQrStart = withContext(Dispatchers.IO) {
+        _loginPhase.value = WechatLoginPhase.Waiting
+        verifyCode.set(null)
+        api.startLogin()
+    }
 
     /** 调用方取消时只停止本次扫码等待，不影响已绑定账号的监听。 */
     suspend fun awaitLogin(qrcode: String): WechatAccount? {
         require(qrcode.isNotBlank()) { "Missing QR code key" }
-        while (currentCoroutineContext().isActive) {
-            val status = withContext(Dispatchers.IO) { api.pollLogin(qrcode) }
+        val deadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(5)
+        var baseUrl = "https://ilinkai.weixin.qq.com"
+        while (currentCoroutineContext().isActive && System.nanoTime() < deadline) {
+            if (_loginPhase.value == WechatLoginPhase.VerifyCode && verifyCode.get() == null) {
+                delay(250)
+                continue
+            }
+            val status = try { api.pollLogin(qrcode, baseUrl, verifyCode.getAndSet(null)) }
+            catch (e: CancellationException) { throw e }
+            catch (e: WechatApiException) { throw e }
+            catch (_: java.io.IOException) { delay(2_000); continue }
+            when (status.status) {
+                "wait" -> Unit
+                "scaned" -> _loginPhase.value = WechatLoginPhase.Scanned
+                "need_verifycode" -> _loginPhase.value = WechatLoginPhase.VerifyCode
+                "scaned_but_redirect" -> {
+                    baseUrl = wechatServerUrl(requireNotNull(status.redirectHost))
+                    _loginPhase.value = WechatLoginPhase.Scanned
+                }
+                "verify_code_blocked" -> error("微信验证失败次数过多，请刷新二维码。")
+                "binded_redirect" -> error("微信返回已绑定状态，请先在微信解除旧绑定后重试。")
+                "expired" -> return null
+                "confirmed" -> Unit
+                else -> error("微信返回不支持的授权状态：${status.status.take(40)}")
+            }
             status.account()?.let { account ->
+                wechatServerUrl(account.baseUrl)
                 store.account()?.let { old -> owners.unbind(ChannelPeer(WechatChannel.ID, old.ownerId, "")) }
                 store.saveAccount(account)
                 store.setEnabled(true)
@@ -149,7 +192,7 @@ class WechatRuntime(
             }
             if (status.status == "expired") return null
             if (status.status == "confirmed") throw IllegalStateException("Incomplete confirmed login response")
-            if (status.status != "wait") delay(1_000)
+            delay(1_000)
         }
         return null
     }
@@ -172,11 +215,29 @@ class WechatRuntime(
         var failures = 0
         while (currentCoroutineContext().isActive && store.enabled()) {
             try {
+                val remaining = store.suspendedUntilMs() - System.currentTimeMillis()
+                if (remaining > 0) {
+                    _state.value = WechatConnectionState.Failed("微信会话暂不可用，暂停后自动重试。")
+                    delay(remaining.coerceAtMost(60_000))
+                    continue
+                }
                 channel.pollOnce()
                 failures = 0
                 _state.value = WechatConnectionState.Connected
+                delay(250) // Do not spin if a proxy or server returns empty polls immediately.
             } catch (e: CancellationException) {
                 throw e
+            } catch (_: SocketTimeoutException) {
+                _state.value = WechatConnectionState.Connected
+                delay(250)
+            } catch (e: WechatApiException) {
+                if (e.code == -14) {
+                    store.suspendUntil(System.currentTimeMillis() + TimeUnit.HOURS.toMillis(1))
+                } else {
+                    failures++
+                    _state.value = WechatConnectionState.Failed("WeChat API ${e.code}")
+                    delay(backoff(failures))
+                }
             } catch (e: WechatHttpException) {
                 if (e.httpCode == 401 || e.httpCode == 403) {
                     store.setEnabled(false)
