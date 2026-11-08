@@ -41,12 +41,12 @@
     <string name="wechat_unbind">Unlink</string>
     <string name="wechat_unbind_title">Unlink WeChat?</string>
     <string name="wechat_unbind_body">Mika stops receiving new WeChat messages and removes the saved binding from this phone. Existing tasks continue.</string>
-    <string name="wechat_capabilities">First version</string>
-    <string name="wechat_capability_text">Private text and real tasks</string>
-    <string name="wechat_capability_replies">Mika questions, results &amp; notices</string>
+    <string name="wechat_capabilities">Connection capabilities</string>
+    <string name="wechat_capability_text">Private text, image &amp; voice tasks</string>
+    <string name="wechat_capability_replies">Questions, results, images &amp; audio files</string>
     <string name="wechat_capability_phone">Payment confirmations &amp; phone takeover</string>
     <string name="wechat_capability_phone_sub">Still completed on this phone</string>
-    <string name="wechat_capability_later">Images, voice, files, groups &amp; multiple accounts</string>
+    <string name="wechat_capability_later">Video, groups &amp; multiple accounts</string>
     <string name="wechat_supported">Supported</string>
     <string name="wechat_phone_only">Phone</string>
     <string name="wechat_later">Later</string>

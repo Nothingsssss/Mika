@@ -6,6 +6,9 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class ChannelPeer(val channelId: String, val peerId: String, val threadId: String)
 
+@Serializable
+data class ChannelFile(val name: String, val uri: String, val size: Long)
+
 sealed interface Delivery {
     val id: String
     val threadId: String
@@ -20,6 +23,7 @@ sealed interface Delivery {
     data class Result(
         override val id: String, override val threadId: String, val text: String,
         val restored: Boolean = false, val title: String = "Mika 任务结果",
+        val file: ChannelFile? = null,
     ) : Delivery
     data class Progress(override val id: String, override val threadId: String, val text: String) : Delivery
     data class Notice(override val id: String, override val threadId: String, val text: String) : Delivery

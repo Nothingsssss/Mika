@@ -12,6 +12,10 @@ import com.wangzan101.mika.core.wechat.WechatApi
 import com.wangzan101.mika.core.wechat.WechatApiException
 import com.wangzan101.mika.core.wechat.WechatUpdates
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.channels.Channel as WorkQueue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -24,12 +28,18 @@ class WechatChannel(
     private val api: WechatApi,
     private val activeAsk: (String) -> Delivery.Ask? = { null },
     private val activeRun: (String) -> RunId? = { null },
+    private val prepareMedia: suspend (PendingWechatMessage) -> String = { it.text },
+    private val workScope: CoroutineScope? = null,
+    private val sendFile: suspend (ChannelPeer, Delivery.Result) -> Unit = { _, _ -> error("Media sender unavailable") },
     private val log: (String) -> Unit = { Log.i(TAG, it) },
 ) : Channel {
     override val id = ID
     override val confirms = false
     @Volatile private var sink: ChannelInputSink? = null
     private val pollLock = Mutex()
+    private var worker: Job? = null
+    private var queue: WorkQueue<PendingWechatMessage>? = null
+    private val scheduled = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     override fun isAlive(peer: ChannelPeer): Boolean {
         val account = store.account()
@@ -38,7 +48,23 @@ class WechatChannel(
 
     override fun start(sink: ChannelInputSink): AutoCloseable {
         this.sink = sink
-        return AutoCloseable { if (this.sink === sink) this.sink = null }
+        if (workScope != null) {
+            val work = WorkQueue<PendingWechatMessage>(WorkQueue.UNLIMITED)
+            queue = work
+            worker = workScope.launch {
+                for (pending in work) try {
+                    if (this@WechatChannel.sink === sink && isAlive(pending.peer)) dispatch(sink, pending)
+                } catch (e: CancellationException) { throw e }
+                catch (_: Exception) { log("Incoming message registration failed; it remains pending") }
+                finally { scheduled.remove(pending.messageId) }
+            }
+        }
+        return AutoCloseable { if (this.sink === sink) {
+            this.sink = null
+            worker?.cancel(); worker = null
+            queue?.close(); queue = null
+            scheduled.clear()
+        } }
     }
 
     override fun acknowledge(messageId: String) = store.acknowledge(messageId)
@@ -55,14 +81,18 @@ class WechatChannel(
         return withContext(Dispatchers.IO) {
             val started = System.nanoTime()
             val outcome = try {
-                api.sendText(account, peer.peerId, delivery.id, text, store.contextToken(peer.peerId))
+                if (delivery is Delivery.Result && delivery.file != null) sendFile(peer, delivery)
+                else api.sendText(account, peer.peerId, delivery.id, text, store.contextToken(peer.peerId))
                 SendOutcome.Delivered
             } catch (e: CancellationException) {
                 throw e
-            } catch (_: WechatApiException) {
+            } catch (e: WechatApiException) {
+                log("Send rejected: API code ${e.code}")
                 SendOutcome.Failed
             } catch (_: IOException) {
                 SendOutcome.Uncertain
+            } catch (_: Exception) {
+                SendOutcome.Failed
             }
             log("${delivery::class.simpleName} send $outcome in ${(System.nanoTime() - started) / 1_000_000} ms")
             outcome
@@ -75,7 +105,7 @@ class WechatChannel(
         val account = store.account()?.takeIf { store.enabled() } ?: return@withLock null
         store.pending().forEach { pending ->
             if (store.account() != account || pending.peer.peerId != account.ownerId || sink !== input) return@withLock null
-            dispatch(input, pending)
+            schedule(input, pending)
         }
         val updates = api.updatesCancellable(account, store.cursor())
         // 换绑或停止后，旧请求的结果不能再写入新会话，也不能推进新账号的游标。
@@ -84,8 +114,11 @@ class WechatChannel(
             val owner = account.ownerId
             if (message.fromUserId != owner) return@forEach
             store.rememberContext(owner, message.contextToken)
-            val text = message.userText() ?: return@forEach
-            val messageId = message.messageId ?: return@forEach
+            if (message.messageType != 1) return@forEach
+            val messageId = message.messageId?.takeIf { it.isNotBlank() } ?: return@forEach
+            val media = message.items.filter { (it.type == 2 && it.image != null) || (it.type == 3 && it.voice?.media != null) }
+            val text = message.userText().orEmpty()
+            if (text.isBlank() && media.isEmpty()) return@forEach
             val peer = store.peer(owner)
             if (store.account() != account || sink !== input || !store.enabled()) return@withLock null
             val askId = activeAsk(peer.threadId)
@@ -93,17 +126,37 @@ class WechatChannel(
                 ?.askId
             val stop = text.trim().lowercase() in setOf("停止", "停止任务", "/stop")
             val target = if (stop) activeRun(peer.threadId)?.value else null
-            if (store.journal(messageId, peer, text, askId, stop, target)) {
-                dispatch(input, PendingWechatMessage(messageId, peer, text, askId, stop, target))
+            if (store.journal(messageId, peer, text, askId, stop, target, media)) {
+                schedule(input, PendingWechatMessage(messageId, peer, text, askId, stop, target, media))
             }
         }
         if (updates.cursor.isNotEmpty() && store.account() == account && store.enabled()) store.saveCursor(updates.cursor)
         updates
     }
 
+    private suspend fun schedule(input: ChannelInputSink, pending: PendingWechatMessage) {
+        // Cancellation must not wait behind a slow CDN download or transcription.
+        if (pending.stopRequested) { dispatch(input, pending); return }
+        val work = queue
+        if (work == null) { dispatch(input, pending); return }
+        if (scheduled.add(pending.messageId) && !work.trySend(pending).isSuccess) scheduled.remove(pending.messageId)
+    }
+
     private suspend fun dispatch(input: ChannelInputSink, pending: PendingWechatMessage) {
         if (!pending.stopRequested) {
-            input.receive(ChannelInput.Text(pending.peer, pending.messageId, pending.text, pending.replyToAskId))
+            val text = if (pending.media.isEmpty()) pending.text else try {
+                store.prepared(pending.messageId) ?: prepareMedia(pending).also { store.prepare(pending.messageId, it) }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) {
+                log("Media preparation failed: ${e::class.simpleName}")
+                send(pending.peer, Delivery.Notice("media-error:${pending.messageId}", pending.peer.threadId,
+                    if (e is WechatMediaInputException) e.message.orEmpty() else
+                        "媒体处理失败，请重发图片或语音。单条消息最多 8 个附件，每个不超过 20 MB。"))
+                acknowledge(pending.messageId)
+                return
+            }
+            if (!isAlive(pending.peer)) return
+            input.receive(ChannelInput.Text(pending.peer, pending.messageId, text, pending.replyToAskId))
             return
         }
         pending.stopRunId?.let { input.receive(ChannelInput.Stop(pending.peer, RunId(it))) }

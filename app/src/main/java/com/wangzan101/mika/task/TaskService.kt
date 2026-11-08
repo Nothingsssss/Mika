@@ -847,6 +847,16 @@ class TaskService : Service() {
         val (title, text) = describe(end)
         val peer = run.channelPeer ?: ChannelPeer(LocalChannel.ID, "phone-owner", run.conversationId)
         val started = SystemClock.elapsedRealtime()
+        if (peer.channelId == com.wangzan101.mika.wechat.WechatChannel.ID) {
+            run.sharedFiles.value.forEachIndexed { index, file ->
+                val sent = outbox.deliver(channelFor(peer), peer, Delivery.Result("$deliveryId:file:$index", run.conversationId, "",
+                    file = com.wangzan101.mika.core.run.ChannelFile(file.name, file.uri, file.size)))
+                if (sent.state != DeliveryState.Delivered) {
+                    outbox.deliver(channelFor(peer), peer, Delivery.Notice("$deliveryId:file-error:$index", peer.threadId,
+                        "附件 ${file.name} 未确认送达，请检查微信后再决定是否重发。"))
+                }
+            }
+        }
         val delivered = outbox.deliver(channelFor(peer), peer, Delivery.Result(deliveryId, run.conversationId, text, title = title))
         val finished = SystemClock.elapsedRealtime()
         val sinceReady = if (run.resultReadyAtMs > 0) finished - run.resultReadyAtMs else -1

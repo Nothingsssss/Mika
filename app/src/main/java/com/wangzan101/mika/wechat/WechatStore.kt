@@ -2,6 +2,7 @@ package com.wangzan101.mika.wechat
 
 import com.wangzan101.mika.core.run.ChannelPeer
 import com.wangzan101.mika.core.wechat.WechatAccount
+import com.wangzan101.mika.core.wechat.WechatItem
 import com.wangzan101.mika.settings.KeyCipher
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -17,6 +18,8 @@ data class PendingWechatMessage(
     val replyToAskId: String? = null,
     val stopRequested: Boolean = false,
     val stopRunId: String? = null,
+    val media: List<WechatItem> = emptyList(),
+    val preparedText: String? = null,
 )
 
 @Serializable
@@ -87,11 +90,17 @@ class WechatStore(private val dir: File, private val cipher: KeyCipher) {
     }
 
     /** 同一消息只入站一次；未确认的会在下次启动由 [pending] 补交。 */
-    @Synchronized fun journal(messageId: String, peer: ChannelPeer, text: String, replyToAskId: String? = null, stopRequested: Boolean = false, stopRunId: String? = null): Boolean {
+    @Synchronized fun journal(messageId: String, peer: ChannelPeer, text: String, replyToAskId: String? = null, stopRequested: Boolean = false, stopRunId: String? = null, media: List<WechatItem> = emptyList()): Boolean {
         if (messageId in state.acknowledgedMessages || state.pending.any { it.messageId == messageId }) return false
-        state = state.copy(pending = state.pending + PendingWechatMessage(messageId, peer, text, replyToAskId, stopRequested, stopRunId))
+        state = state.copy(pending = state.pending + PendingWechatMessage(messageId, peer, text, replyToAskId, stopRequested, stopRunId, media))
         saveState()
         return true
+    }
+
+    @Synchronized fun prepared(messageId: String) = state.pending.firstOrNull { it.messageId == messageId }?.preparedText
+    @Synchronized fun prepare(messageId: String, text: String) {
+        state = state.copy(pending = state.pending.map { if (it.messageId == messageId) it.copy(preparedText = text) else it })
+        saveState()
     }
 
     @Synchronized fun pending(): List<PendingWechatMessage> = state.pending

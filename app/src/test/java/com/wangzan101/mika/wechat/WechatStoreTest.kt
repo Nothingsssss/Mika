@@ -17,6 +17,21 @@ class WechatStoreTest {
         override fun decrypt(data: ByteArray): ByteArray = data
     }
 
+    @Test fun mediaAndPreparedGoalSurviveRestartWithoutReimport() {
+        val dir = tmp.newFolder()
+        val first = WechatStore(dir, cipher)
+        val peer = ChannelPeer("wechat", "owner", "thread")
+        val media = listOf(com.wangzan101.mika.core.wechat.WechatItem(2,
+            image = com.wangzan101.mika.core.wechat.WechatImage(com.wangzan101.mika.core.wechat.WechatMedia(query = "encrypted-reference"))))
+        assertTrue(first.journal("image-1", peer, "", media = media))
+        first.prepare("image-1", "goal with workspace attachment")
+        val reopened = WechatStore(dir, cipher)
+        assertEquals(media, reopened.pending().single().media)
+        assertEquals("goal with workspace attachment", reopened.prepared("image-1"))
+        reopened.acknowledge("image-1")
+        assertFalse(WechatStore(dir, cipher).journal("image-1", peer, "", media = media))
+    }
+
     @Test fun accountCursorAndPendingMessageSurviveReopen() {
         val dir = tmp.newFolder()
         val first = WechatStore(dir, cipher)

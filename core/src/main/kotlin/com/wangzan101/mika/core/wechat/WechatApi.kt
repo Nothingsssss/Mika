@@ -85,6 +85,9 @@ data class WechatText(val text: String = "")
 data class WechatItem(
     val type: Int = 0,
     @SerialName("text_item") val textItem: WechatText? = null,
+    @SerialName("image_item") val image: WechatImage? = null,
+    @SerialName("voice_item") val voice: WechatVoice? = null,
+    @SerialName("file_item") val file: WechatFile? = null,
 )
 
 @Serializable
@@ -100,10 +103,14 @@ data class WechatMessage(
     @SerialName("item_list") val items: List<WechatItem> = emptyList(),
     @SerialName("context_token") val contextToken: String? = null,
 ) {
-    /** 第一版只收用户私聊文本；其他消息不进入任务系统。 */
+    /** 用户私聊的文字与微信语音转写；媒体附件由渠道统一准备。 */
     fun userText(): String? {
         if (messageType != 1 || messageId.isNullOrBlank() || fromUserId.isNullOrBlank()) return null
-        return items.firstOrNull { it.type == 1 }?.textItem?.text?.takeIf { it.isNotBlank() }
+        return items.mapNotNull { when (it.type) {
+            1 -> it.textItem?.text
+            3 -> it.voice?.text
+            else -> null
+        } }.filter { it.isNotBlank() }.joinToString("\n").takeIf { it.isNotBlank() }
     }
 }
 
@@ -178,6 +185,17 @@ class WechatApi(
         post(account, "sendmessage", body, SendRequest.serializer(), WechatQrStart.serializer())
     }
 
+    fun uploadUrl(account: WechatAccount, filekey: String, mediaType: Int, peer: String,
+        size: Int, md5: String, encryptedSize: Int, aeskey: String): WechatUploadReply =
+        post(account, "getuploadurl", WechatUploadRequest(filekey, mediaType, peer, size, md5,
+            encryptedSize, true, aeskey, baseInfo()), WechatUploadRequest.serializer(), WechatUploadReply.serializer())
+
+    fun sendItem(account: WechatAccount, peer: String, clientId: String, item: WechatItem, context: String?) {
+        post(account, "sendmessage", SendRequest(WechatMessage(fromUserId = "", toUserId = peer,
+            clientId = clientId, messageType = 2, messageState = 2, items = listOf(item), contextToken = context), baseInfo()),
+            SendRequest.serializer(), WechatQrStart.serializer())
+    }
+
     private inline fun <reified T, reified R> post(account: WechatAccount, path: String, body: T,
         bodySerializer: kotlinx.serialization.SerializationStrategy<T>, responseSerializer: kotlinx.serialization.DeserializationStrategy<R>): R {
         val payload = json.encodeToString(bodySerializer, body).toRequestBody(jsonBody)
@@ -218,6 +236,7 @@ class WechatApi(
         val (code, message) = when (result) {
             is WechatQrStart -> (result.ret.takeIf { it != 0 } ?: result.errcode) to result.errmsg
             is WechatQrStatus -> (result.ret.takeIf { it != 0 } ?: result.errcode) to result.errmsg
+            is WechatUploadReply -> (result.ret.takeIf { it != 0 } ?: result.errcode) to result.errmsg
             is WechatUpdates -> (result.ret.takeIf { it != 0 } ?: result.errcode) to result.errmsg
             else -> 0 to null
         }

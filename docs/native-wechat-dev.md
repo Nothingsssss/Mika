@@ -39,6 +39,8 @@ The independent development package does not import the release app’s private 
 
 See [native-wechat-validation.md](native-wechat-validation.md). Phone screenshots and private execution logs are kept locally and are not committed. No WeChat tokens, QR authorization material, model credentials, or private task logs are included in this repository.
 
+The image/voice extension, supported formats and separate media acceptance results are documented in [native-wechat-media.md](native-wechat-media.md).
+
 ## Operational limits
 
 - Phone still needs internet and a reachable model provider. The iPhone and Android do not need the same network.

@@ -851,7 +851,8 @@ class TaskRun(
             dispatcher = tools
             val agent = AgentLoop(
                 model, tools,
-                SystemPrompt.identity(),
+                SystemPrompt.identity() + if (channelPeer?.channelId == "wechat")
+                    "\n当前任务来自微信私聊。你的文字答复会自动回传当前微信对话；要回传图片、音频或文件，请使用 share_file 导出工作区文件，渠道会自动发送，不能只提供手机上的路径。图片以图片消息发送；音频以可播放文件发送，腾讯接口当前不能可靠投递原生语音气泡。无需打开微信 App。没有语音合成能力时不要声称已生成语音。" else "",
                 // 助手断开、被挪走只在这一步用的是手机时才查
                 gate = { w ->
                     if (phoneScreen.acquired && dispatcher?.surface != WEB) phone?.screen?.let { awaitUserPick(it, taskGate, w) }

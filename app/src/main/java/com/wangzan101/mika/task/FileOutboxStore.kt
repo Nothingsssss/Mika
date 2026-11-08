@@ -4,6 +4,7 @@ import com.wangzan101.mika.R
 import com.wangzan101.mika.i18n.tr
 import android.util.Log
 import com.wangzan101.mika.core.run.ChannelPeer
+import com.wangzan101.mika.core.run.ChannelFile
 import com.wangzan101.mika.core.run.Delivery
 import com.wangzan101.mika.core.run.DeliveryRecord
 import com.wangzan101.mika.core.run.DeliveryState
@@ -36,7 +37,8 @@ class FileOutboxStore(private val file: File) : OutboxStore {
                     "ask" -> Delivery.Ask(id, threadId, o.getValue("askId").jsonPrimitive.content,
                         Delivery.Ask.Kind.valueOf(o.getValue("askKind").jsonPrimitive.content), text)
                     "result" -> Delivery.Result(id, threadId, text,
-                        o["restored"]?.jsonPrimitive?.content == "true", o["title"]?.jsonPrimitive?.contentOrNull ?: tr(R.string.notif_result_title))
+                        o["restored"]?.jsonPrimitive?.content == "true", o["title"]?.jsonPrimitive?.contentOrNull ?: tr(R.string.notif_result_title),
+                        o["file"]?.let { Json.decodeFromJsonElement(ChannelFile.serializer(), it) })
                     "progress" -> Delivery.Progress(id, threadId, text)
                     else -> Delivery.Notice(id, threadId, text)
                 }
@@ -67,6 +69,7 @@ class FileOutboxStore(private val file: File) : OutboxStore {
                 }
                 is Delivery.Result -> {
                     put("kind", "result"); put("text", d.text); put("restored", d.restored); put("title", d.title)
+                    d.file?.let { put("file", Json.encodeToJsonElement(ChannelFile.serializer(), it)) }
                 }
                 is Delivery.Progress -> { put("kind", "progress"); put("text", d.text) }
                 is Delivery.Notice -> { put("kind", "notice"); put("text", d.text) }

@@ -41,12 +41,12 @@
     <string name="wechat_unbind">解除绑定</string>
     <string name="wechat_unbind_title">解除微信绑定？</string>
     <string name="wechat_unbind_body">Mika 将停止接收微信新消息，并删除保存在本机的绑定信息。现有任务不受影响。</string>
-    <string name="wechat_capabilities">首版能力</string>
-    <string name="wechat_capability_text">私聊文本与真实任务</string>
-    <string name="wechat_capability_replies">Mika 追问、任务结果与通知</string>
+    <string name="wechat_capabilities">连接能力</string>
+    <string name="wechat_capability_text">私聊文字、图片与语音任务</string>
+    <string name="wechat_capability_replies">追问、任务结果与图片、音频文件回传</string>
     <string name="wechat_capability_phone">付款确认与手机接管</string>
     <string name="wechat_capability_phone_sub">仍需在手机上完成</string>
-    <string name="wechat_capability_later">图片、语音、文件、群聊、多账号</string>
+    <string name="wechat_capability_later">视频、群聊、多账号</string>
     <string name="wechat_supported">支持</string>
     <string name="wechat_phone_only">手机</string>
     <string name="wechat_later">后续</string>

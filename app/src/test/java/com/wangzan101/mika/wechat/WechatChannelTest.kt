@@ -319,4 +319,66 @@ class WechatChannelTest {
             assertEquals(null, store.contextToken("owner"))
         }
     }
+
+    @Test fun imageMessageIsPreparedOnceAndThenDeduplicated() = runTest {
+        MockWebServer().use { server ->
+            server.start(InetAddress.getByName("127.0.0.1"), 0)
+            val store = WechatStore(tmp.newFolder(), cipher)
+            store.saveAccount(WechatAccount("token", server.url("/").toString(), "bot", "owner"))
+            store.setEnabled(true)
+            var preparations = 0
+            val channel = WechatChannel(store, WechatApi(OkHttpClient(), "0.1.38"),
+                prepareMedia = { preparations++; "分析图片\n附件:/workspace/inbox/image.png(1 KB)" }, log = {})
+            val received = mutableListOf<ChannelInput>()
+            channel.start(ChannelInputSink { received += it; channel.acknowledge((it as ChannelInput.Text).messageId) })
+            val update = """{"get_updates_buf":"media","msgs":[{"message_id":"image-1","from_user_id":"owner","message_type":1,"item_list":[{"type":2,"image_item":{"media":{"encrypt_query_param":"q","aes_key":"a"}}}]}]}"""
+            server.enqueue(response(update)); channel.pollOnce()
+            server.enqueue(response(update)); channel.pollOnce()
+            assertEquals(1, preparations)
+            assertEquals(1, received.size)
+            assertTrue((received.single() as ChannelInput.Text).text.contains("/workspace/inbox/image.png"))
+        }
+    }
+
+    @Test fun voiceTranscriptWithoutMediaBecomesTheTaskGoal() = runTest {
+        MockWebServer().use { server ->
+            server.start(InetAddress.getByName("127.0.0.1"), 0)
+            val store = WechatStore(tmp.newFolder(), cipher)
+            store.saveAccount(WechatAccount("token", server.url("/").toString(), "bot", "owner"))
+            store.setEnabled(true)
+            val channel = WechatChannel(store, WechatApi(OkHttpClient(), "0.1.38"), log = {})
+            val received = mutableListOf<ChannelInput>()
+            channel.start(ChannelInputSink { received += it })
+            server.enqueue(response("""{"msgs":[{"message_id":"voice","from_user_id":"owner","message_type":1,"item_list":[{"type":3,"voice_item":{"text":"打开计算器"}}]}]}"""))
+            channel.pollOnce()
+            assertEquals("打开计算器", (received.single() as ChannelInput.Text).text)
+        }
+    }
+
+    @Test fun pendingMediaWorkDoesNotBlockTheNextLongPoll() = runBlocking {
+        MockWebServer().use { server ->
+            server.start(InetAddress.getByName("127.0.0.1"), 0)
+            val store = WechatStore(tmp.newFolder(), cipher)
+            store.saveAccount(WechatAccount("token", server.url("/").toString(), "bot", "owner"))
+            store.setEnabled(true)
+            val gate = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val started = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+            val received = mutableListOf<ChannelInput>()
+            val channel = WechatChannel(store, WechatApi(OkHttpClient(), "0.1.38"),
+                activeRun = { RunId("active-run") },
+                prepareMedia = { started.complete(Unit); gate.await(); "image ready" }, workScope = scope, log = {})
+            val registration = channel.start(ChannelInputSink { received += it })
+            server.enqueue(response("""{"get_updates_buf":"1","msgs":[{"message_id":"img","from_user_id":"owner","message_type":1,"item_list":[{"type":2,"image_item":{"media":{"encrypt_query_param":"q"}}}]}]}"""))
+            channel.pollOnce()
+            withTimeout(1000) { started.await() }
+            server.enqueue(response("""{"get_updates_buf":"2","msgs":[{"message_id":"stop","from_user_id":"owner","message_type":1,"item_list":[{"type":1,"text_item":{"text":"停止"}}]}]}"""))
+            server.enqueue(response("""{"ret":0}"""))
+            withTimeout(1000) { channel.pollOnce() }
+            assertEquals("2", store.cursor())
+            assertEquals(listOf(ChannelInput.Stop(store.peer("owner"), RunId("active-run"))), received)
+            registration.close()
+            scope.coroutineContext[kotlinx.coroutines.Job]!!.cancel()
+        }
+    }
 }

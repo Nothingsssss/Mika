@@ -244,3 +244,13 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
+
+
+## libjitsi SILK codec
+
+Source: https://github.com/jitsi/libjitsi/tree/f6f5b5677ab238cf3171d4d097002acd563481a1/src/main/java/org/jitsi/impl/neomedia/codec/audio/silk
+
+Copyright @ 2015 Atlassian Pty Ltd. Apache License 2.0.
+The pure Java SILK codec is included (excluding JMF JavaEncoder/JavaDecoder adapters). Original source headers are retained. Mika adds the bounded WechatSilk container adapter. No JMF, Node.js, native codec, or OpenClaw runtime is required.
+
+Local change: ResidualEnergyFLP's debug-only assertion accepts a finite negative residual caused by rounding before the existing energy clamp. The codec's release-mode clamp and arithmetic are unchanged.

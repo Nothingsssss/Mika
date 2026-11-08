@@ -50,7 +50,7 @@ sealed interface WechatConnectionState {
     data class Failed(val message: String) : WechatConnectionState
 }
 
-/** 单账号、私聊文本的微信运行时。监听存活由独立前台服务负责，任务仍只进 TaskService。 */
+/** 单账号私聊运行时。监听存活由独立前台服务负责，文字和媒体任务仍只进 TaskService。 */
 class WechatRuntime(
     private val context: Context,
     val store: WechatStore,
@@ -61,6 +61,7 @@ class WechatRuntime(
         .connectTimeout(15, TimeUnit.SECONDS).writeTimeout(20, TimeUnit.SECONDS)
         .readTimeout(45, TimeUnit.SECONDS))
     private val api = WechatApi(http, BuildConfig.VERSION_NAME)
+    private val files = WechatFiles(context, store, api, com.wangzan101.mika.core.wechat.WechatMediaApi(http, api))
     private val owners = MemoryOwnerIdentity()
     private val app get() = context.applicationContext as MikaApp
     private val gateway = ChannelGateway(owners,
@@ -82,7 +83,8 @@ class WechatRuntime(
 
     val channel = WechatChannel(store, api,
         activeAsk = { threadId -> app.taskState.run(threadId)?.activeAsk },
-        activeRun = { threadId -> app.taskState.run(threadId)?.let { RunId(it.key) } })
+        activeRun = { threadId -> app.taskState.run(threadId)?.let { RunId(it.key) } },
+        prepareMedia = files::prepare, workScope = scope, sendFile = files::send)
     private var registration: AutoCloseable? = null
     private var monitor: Job? = null
     private val network = WechatNetwork(context) { restartMonitor() }
